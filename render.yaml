@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: video-ai-app
+    runtime: python
+    env: python
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python app.py
+    plan: starter
+    healthCheckPath: /health
+    region: oregon
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.4"
+      - key: FLASK_ENV
+        value: production
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: GUNICORN_CMD_ARGS
+        value: "--timeout 120 --keep-alive 5 --max-requests 100 --max-requests-jitter 10"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: GOOGLE_API_KEY
+        sync: false  # You'll need to set this manually in Render dashboard
+      # WebSocket and performance settings
+      - key: WEBSOCKET_TIMEOUT
+        value: "120"
+      - key: MAX_CONTENT_LENGTH
+        value: "52428800"  # 50MB
+      - key: UPLOAD_FOLDER
+        value: "/tmp"
+      # Logging
+      - key: LOG_LEVEL
+        value: INFO
+    # Disk space for temporary files
+    disk:
+      name: tmp
+      mountPath: /tmp
+      sizeGB: 1
+

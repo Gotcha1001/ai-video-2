@@ -1,0 +1,397 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Assistant Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.min.js"></script>
+    <style>
+        .gradient-background {
+            background: linear-gradient(300deg, #4B0082, #6A0DAD, #E6E6FA);
+            background-size: 180% 180%;
+            animation: gradient-animation 6s ease infinite;
+        }
+        @keyframes gradient-animation {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+        .preview-container {
+            position: relative;
+            background: #1a1a1a;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        [id^="previewVideo"] {
+            width: 100%;
+            max-height: 400px;
+            object-fit: contain;
+        }
+        .sharing-indicator {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(34, 197, 94, 0.9);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body class="gradient-background min-h-screen flex flex-col items-center justify-center text-white p-4">
+    <div class="w-full max-w-4xl p-6 rounded-lg shadow-lg bg-gray-800 bg-opacity-50">
+        <h1 class="text-3xl font-bold mb-4 text-center">AI Assistant - {{ mode | capitalize }} Mode</h1>
+        <div class="mb-6 preview-container">
+            {% if mode == 'desktop' %}
+                <video id="previewVideo_desktop" autoplay playsinline muted></video>
+                <div id="sharingIndicator_desktop" class="sharing-indicator" style="display: none;">Screen Sharing Active</div>
+            {% else %}
+                <video id="previewVideo_camera" autoplay playsinline muted></video>
+                <div id="sharingIndicator_camera" class="sharing-indicator" style="display: none;">Camera Active</div>
+            {% endif %}
+        </div>
+        <div id="chatArea" class="h-64 overflow-y-auto p-4 bg-gray-900 bg-opacity-70 rounded-lg mb-4">
+            {% for item in responses %}
+            <div class="mb-2">
+                <p class="font-semibold text-purple-300">You: {{ item.prompt }}</p>
+                <p class="text-gray-200">AI: {{ item.response }}</p>
+            </div>
+            {% endfor %}
+        </div>
+        <div class="flex justify-center space-x-4 mb-4">
+            {% if mode == 'desktop' %}
+                <button id="startScreenShare" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition duration-300">Start Screen Share</button>
+                <button id="stopScreenShare" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition duration-300" style="display: none;">Stop Screen Share</button>
+            {% else %}
+                <button id="startCamera" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition duration-300">Start Camera</button>
+                <button id="stopCamera" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition duration-300" style="display: none;">Stop Camera</button>
+            {% endif %}
+            <button id="stopButton" class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded transition duration-300">Stop and Return</button>
+            <button onclick="restartRecognition()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition duration-300">Restart Speech</button>
+        </div>
+        <div id="status" class="mt-4 text-center"></div>
+    </div>
+    <script>
+        let recognition;
+        let isProcessing = false;
+        let isRecognitionRunning = false;
+        let socket;
+        let mediaStream;
+        let video = document.getElementById('previewVideo_{{ mode }}');
+        let sharingIndicator = document.getElementById('sharingIndicator_{{ mode }}');
+        let canvas = document.createElement('canvas');
+        let context = canvas.getContext('2d');
+        let frameInterval;
+
+        // Initialize socket connection with credentials
+        socket = io.connect(window.location.origin, { withCredentials: true });
+        socket.on('connect', () => {
+            console.log('WebSocket connected');
+            document.getElementById('status').innerText = 'WebSocket connected';
+        });
+        socket.on('disconnect', () => {
+            console.log('WebSocket disconnected');
+            document.getElementById('status').innerText = 'WebSocket disconnected';
+        });
+        socket.on('connect_error', (error) => {
+            console.error('WebSocket connection error:', error);
+            document.getElementById('status').innerText = 'WebSocket connection error: ' + error.message;
+        });
+
+        // Text-to-Speech function
+        function speakResponse(text) {
+            if ('speechSynthesis' in window) {
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = 'en-US';
+                const voices = window.speechSynthesis.getVoices();
+                let maleVoice = voices.find(voice =>
+                    voice.name.includes('Male') ||
+                    voice.name.includes('David') ||
+                    voice.name.includes('Mark') ||
+                    voice.name.includes('Guy')
+                );
+                if (!maleVoice) {
+                    maleVoice = voices[0];
+                }
+                utterance.voice = maleVoice;
+                utterance.rate = 1.0;
+                utterance.volume = 0.8;
+                window.speechSynthesis.speak(utterance);
+            } else {
+                console.warn('Web Speech API not supported');
+                document.getElementById('status').innerText = 'Text-to-speech not supported';
+            }
+        }
+
+        // Screen/Camera sharing functions
+        async function startScreenShare() {
+            try {
+                mediaStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { mediaSource: 'screen' },
+                    audio: false
+                });
+                video.srcObject = mediaStream;
+                sharingIndicator.style.display = 'block';
+                document.getElementById('startScreenShare').style.display = 'none';
+                document.getElementById('stopScreenShare').style.display = 'inline-block';
+                startFrameCapture('screen_frame');
+                document.getElementById('status').innerText = 'Screen sharing started';
+                mediaStream.getVideoTracks()[0].onended = () => {
+                    stopSharing();
+                };
+            } catch (err) {
+                console.error('Error starting screen share:', err);
+                document.getElementById('status').innerText = 'Failed to start screen sharing: ' + err.message;
+            }
+        }
+
+        async function startCamera() {
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    video: true,
+                    audio: false
+                });
+                video.srcObject = mediaStream;
+                sharingIndicator.style.display = 'block';
+                document.getElementById('startCamera').style.display = 'none';
+                document.getElementById('stopCamera').style.display = 'inline-block';
+                startFrameCapture('camera_frame');
+                document.getElementById('status').innerText = 'Camera started';
+            } catch (err) {
+                console.error('Error starting camera:', err);
+                document.getElementById('status').innerText = 'Failed to start camera: ' + err.message;
+            }
+        }
+
+        function stopSharing() {
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            if (frameInterval) {
+                clearInterval(frameInterval);
+                frameInterval = null;
+            }
+            video.srcObject = null;
+            sharingIndicator.style.display = 'none';
+            if ('{{ mode }}' === 'desktop') {
+                document.getElementById('startScreenShare').style.display = 'inline-block';
+                document.getElementById('stopScreenShare').style.display = 'none';
+            } else {
+                document.getElementById('startCamera').style.display = 'inline-block';
+                document.getElementById('stopCamera').style.display = 'none';
+            }
+            document.getElementById('status').innerText = 'Sharing stopped';
+        }
+
+        function startFrameCapture(eventName) {
+            if (!video || !canvas || !context) {
+                console.error('Frame capture setup failed: missing video, canvas, or context');
+                document.getElementById('status').innerText = 'Frame capture setup failed';
+                return;
+            }
+            const sendFrame = () => {
+                try {
+                    if (video.videoWidth && video.videoHeight) {
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                        const imageData = canvas.toDataURL('image/jpeg', 0.7);
+                        socket.emit(eventName, imageData);
+                        console.log(`Sent ${eventName} frame, size: ${imageData.length} bytes`);
+                    } else {
+                        console.warn('No video dimensions available');
+                    }
+                } catch (err) {
+                    console.error('Error capturing frame:', err);
+                    document.getElementById('status').innerText = 'Error capturing frame: ' + err.message;
+                }
+            };
+            sendFrame(); // Send the first frame immediately
+            frameInterval = setInterval(sendFrame, 1000); // Then send every second
+        }
+
+        // Event listeners
+        if ('{{ mode }}' === 'desktop') {
+            document.getElementById('startScreenShare').addEventListener('click', startScreenShare);
+            document.getElementById('stopScreenShare').addEventListener('click', stopSharing);
+        } else {
+            document.getElementById('startCamera').addEventListener('click', startCamera);
+            document.getElementById('stopCamera').addEventListener('click', stopSharing);
+        }
+
+        // Speech recognition setup
+        function restartRecognition() {
+            if (recognition && isRecognitionRunning) {
+                recognition.stop();
+                isRecognitionRunning = false;
+            }
+            setTimeout(() => {
+                if (!isRecognitionRunning) {
+                    try {
+                        recognition.start();
+                        isRecognitionRunning = true;
+                        document.getElementById('status').innerText = 'Speech recognition restarted.';
+                    } catch (e) {
+                        console.error('Failed to restart recognition:', e);
+                        document.getElementById('status').innerText = 'Failed to restart recognition: ' + e.message;
+                    }
+                }
+            }, 100);
+        }
+
+        if ('webkitSpeechRecognition' in window) {
+            recognition = new webkitSpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = false;
+            recognition.lang = 'en-US';
+
+            recognition.onstart = function() {
+                isRecognitionRunning = true;
+                document.getElementById('status').innerText = 'Listening for speech...';
+            };
+
+            recognition.onresult = function(event) {
+                if (isProcessing) return;
+                isProcessing = true;
+                const prompt = event.results[event.results.length - 1][0].transcript.trim();
+                console.log('Recognized prompt:', prompt);
+                if (!prompt) {
+                    isProcessing = false;
+                    return;
+                }
+                document.getElementById('status').innerText = 'Processing: ' + prompt;
+                fetch('/process_audio', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt: prompt, mode: '{{ mode }}' }),
+                    credentials: 'include'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        document.getElementById('status').innerText = data.error;
+                        console.error('Process audio error:', data.error);
+                    } else {
+                        const chatArea = document.getElementById('chatArea');
+                        const newChat = document.createElement('div');
+                        newChat.className = 'mb-2';
+                        newChat.innerHTML = `<p class="font-semibold text-purple-300">You: ${prompt}</p><p class="text-gray-200">AI: ${data.response}</p>`;
+                        chatArea.appendChild(newChat);
+                        chatArea.scrollTop = chatArea.scrollHeight;
+                        document.getElementById('status').innerText = '';
+                        speakResponse(data.response);
+                    }
+                    isProcessing = false;
+                })
+                .catch(err => {
+                    console.error('Error processing audio:', err);
+                    document.getElementById('status').innerText = 'Error: ' + err.message;
+                    isProcessing = false;
+                });
+            };
+
+            recognition.onerror = function(event) {
+                console.error('Speech recognition error:', event.error);
+                isProcessing = false;
+                isRecognitionRunning = false;
+                if (event.error === 'no-speech') {
+                    document.getElementById('status').innerText = 'No speech detected. Please speak clearly.';
+                } else if (event.error === 'audio-capture') {
+                    document.getElementById('status').innerText = 'Microphone error. Check if microphone is connected.';
+                } else {
+                    document.getElementById('status').innerText = 'Speech recognition error: ' + event.error;
+                }
+            };
+
+            recognition.onend = function() {
+                isRecognitionRunning = false;
+                setTimeout(() => {
+                    if (!isRecognitionRunning) {
+                        try {
+                            recognition.start();
+                            isRecognitionRunning = true;
+                        } catch (e) {
+                            console.error('Recognition restart failed:', e);
+                            document.getElementById('status').innerText = 'Recognition restart failed: ' + e.message;
+                        }
+                    }
+                }, 1000);
+            };
+
+            // Start recognition when video starts playing
+            video.addEventListener('playing', () => {
+                if (!isRecognitionRunning) {
+                    try {
+                        recognition.start();
+                        isRecognitionRunning = true;
+                        document.getElementById('status').innerText = 'Speech recognition started.';
+                    } catch (e) {
+                        console.error('Failed to start recognition:', e);
+                        document.getElementById('status').innerText = 'Failed to start recognition: ' + e.message;
+                    }
+                }
+            });
+        } else {
+            document.getElementById('status').innerText = 'Speech recognition not supported. Use Chrome or Edge.';
+        }
+
+        // Stop button functionality
+        document.getElementById('stopButton').addEventListener('click', () => {
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+            }
+            if (recognition && isRecognitionRunning) {
+                recognition.stop();
+                isRecognitionRunning = false;
+            }
+            stopSharing();
+            fetch('/stop_stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: '{{ mode }}' }),
+                credentials: 'include'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.redirect) {
+                    window.location.href = data.redirect;
+                }
+            })
+            .catch(err => {
+                console.error('Error stopping stream:', err);
+                document.getElementById('status').innerText = 'Error stopping stream: ' + err.message;
+            });
+        });
+
+        // Auto-start sharing on page load
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                if ('{{ mode }}' === 'desktop') {
+                    const startButton = document.getElementById('startScreenShare');
+                    if (startButton) {
+                        startButton.click();
+                    } else {
+                        console.error('Start screen share button not found');
+                        document.getElementById('status').innerText = 'Start screen share button not found';
+                    }
+                } else {
+                    const startButton = document.getElementById('startCamera');
+                    if (startButton) {
+                        startButton.click();
+                    } else {
+                        console.error('Start camera button not found');
+                        document.getElementById('status').innerText = 'Start camera button not found';
+                    }
+                }
+            }, 1000);
+        });
+    </script>
+</body>
+</html>
+
+

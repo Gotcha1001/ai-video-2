@@ -1,0 +1,59 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Desktop & Camera Assistant</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .gradient-background {
+            background: linear-gradient(300deg, #4B0082, #6A0DAD, #E6E6FA);
+            background-size: 180% 180%;
+            animation: gradient-animation 6s ease infinite;
+        }
+        @keyframes gradient-animation {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+    </style>
+</head>
+<body class="gradient-background min-h-screen flex flex-col items-center justify-center text-white">
+    <div class="text-center max-w-2xl p-6 rounded-lg shadow-lg">
+        <h1 class="text-4xl font-bold mb-4">Welcome to the AI Assistant</h1>
+        <img src="/static/image.jpg" alt="AI Assistant" class="w-full h-64 object-cover rounded-lg mb-6">
+        <p class="mb-6">Experience our AI-powered assistant that can analyze your desktop or camera feed. Choose your mode below and interact via voice commands.</p>
+        <div class="flex justify-center space-x-4">
+            <button onclick="startStream('desktop')" class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded transition duration-300">Desktop Mode</button>
+            <button onclick="startStream('camera')" class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded transition duration-300">Camera Mode</button>
+            <a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ" target="_blank" class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded transition duration-300">Watch AI Video Launch</a>
+        </div>
+        <div id="response" class="mt-6 text-lg"></div>
+    </div>
+    <script>
+        function startStream(mode) {
+            document.activeMode = mode;
+            fetch('/start_stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: mode })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    document.getElementById('response').innerText = data.error;
+                } else if (data.redirect) {
+                    window.location.href = data.redirect;
+                } else {
+                    document.getElementById('response').innerText = data.status;
+                }
+            })
+            .catch(err => {
+                document.getElementById('response').innerText = 'Error starting stream';
+            });
+        }
+    </script>
+</body>
+</html>
+

@@ -1,0 +1,12 @@
+
+flask==2.3.3
+flask-socketio==5.3.6
+python-socketio==5.8.0
+pillow==10.0.1
+python-dotenv==1.0.0
+langchain-google-genai==1.0.10
+langchain-core==0.2.38
+eventlet==0.33.3
+gunicorn==21.2.0
+langchain==0.2.16
+langchain-community==0.2.16
