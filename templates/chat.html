@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -100,6 +99,27 @@
         socket.on('connect_error', (error) => {
             console.error('WebSocket connection error:', error);
             document.getElementById('status').innerText = 'WebSocket connection error: ' + error.message;
+        });
+
+        // Handle initial LLM response
+        socket.on('initial_response', (data) => {
+            console.log('Received initial response:', data.response);
+            const chatArea = document.getElementById('chatArea');
+            const newChat = document.createElement('div');
+            newChat.className = 'mb-2';
+            newChat.innerHTML = `<p class="text-gray-200">AI: ${data.response}</p>`;
+            chatArea.appendChild(newChat);
+            chatArea.scrollTop = chatArea.scrollHeight;
+            document.getElementById('status').innerText = '';
+            speakResponse(data.response);
+        });
+
+        // Handle frame processing feedback
+        socket.on('frame_processed', (data) => {
+            console.log('Frame processed:', data);
+            if (data.status === 'error') {
+                document.getElementById('status').innerText = 'Frame processing error: ' + data.message;
+            }
         });
 
         // Text-to-Speech function
@@ -212,7 +232,7 @@
                 }
             };
             sendFrame(); // Send the first frame immediately
-            frameInterval = setInterval(sendFrame, 1000); // Then send every second
+            frameInterval = setInterval(sendFrame, 5000); // Send every 5 seconds to reduce load
         }
 
         // Event listeners
@@ -393,5 +413,4 @@
     </script>
 </body>
 </html>
-
 

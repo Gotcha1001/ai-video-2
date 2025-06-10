@@ -3,10 +3,11 @@ import uuid
 import base64
 import logging
 import tempfile
+import time
 from PIL import Image
 from io import BytesIO
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, jsonify, Response, redirect, url_for, session
+from flask import Flask, render_template, request, jsonify, redirect, url_for, session
 from flask_socketio import SocketIO, emit
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -79,13 +80,30 @@ def process_frame(frame_data, scale_factor=0.3):
         logger.error(f"Frame processing error: {str(e)}")
         return None
 
+def invoke_llm_for_description(frame_base64, mode):
+    """Invoke LLM to describe the frame and return the response."""
+    try:
+        system_prompt = SystemMessage(
+            content="You are a helpful AI assistant analyzing images. Provide a brief description (1-2 sentences) of what you see in the image, then ask 'How can I help you?'."
+        )
+        user_prompt = HumanMessage(content=[
+            {"type": "text", "text": f"Describe what you see in this {'screen' if mode == 'desktop' else 'camera'} image briefly."},
+            {"type": "image_url", "image_url": f"data:image/jpeg;base64,{frame_base64}"}
+        ])
+        response = llm.invoke([system_prompt, user_prompt])
+        response_text = response.content if hasattr(response, 'content') else str(response)
+        return response_text
+    except Exception as e:
+        logger.error(f"LLM description error: {str(e)}")
+        return f"Unable to describe the image. How can I help you?"
+
 @app.route('/')
 def index():
     """Render the index page."""
     session_id = session.get('session_id', str(uuid.uuid4()))
     session['session_id'] = session_id
     if session_id not in sessions:
-        sessions[session_id] = {'mode': None, 'responses': [], 'frame_path': None}
+        sessions[session_id] = {'mode': None, 'responses': [], 'frame_path': None, 'session_initialized': False}
     logger.info(f"Session {session_id} initialized")
     return render_template('index.html')
 
@@ -117,6 +135,7 @@ def start_stream():
     sessions[session_id]['responses'] = []
     sessions[session_id]['mode'] = mode
     sessions[session_id]['frame_path'] = None
+    sessions[session_id]['session_initialized'] = False
     logger.info(f"Stream started for mode: {mode}, session_id: {session_id}")
     return jsonify({'status': 'Stream started', 'redirect': url_for('chat', mode=mode)})
 
@@ -135,6 +154,7 @@ def stop_stream():
         sessions[session_id]['mode'] = None
         sessions[session_id]['responses'] = []
         sessions[session_id]['frame_path'] = None
+        sessions[session_id]['session_initialized'] = False
         logger.info(f"Session {session_id} reset")
     else:
         logger.info(f"No active stream found for session_id: {session_id}, mode: {mode}")
@@ -171,11 +191,22 @@ def handle_screen_frame(frame_data):
                     tmp_file.write(base64.b64decode(processed_frame))
                     sessions[session_id]['frame_path'] = tmp_file.name
                 logger.info(f"Desktop screen frame saved to {tmp_file.name}")
+
+                # Send initial description if session not initialized
+                if not sessions[session_id]['session_initialized'] and llm:
+                    frame_base64 = base64.b64encode(base64.b64decode(processed_frame)).decode()
+                    response_text = invoke_llm_for_description(frame_base64, 'desktop')
+                    sessions[session_id]['responses'].append({'prompt': '', 'response': response_text})
+                    sessions[session_id]['session_initialized'] = True
+                    emit('initial_response', {'response': response_text})
+
                 emit('frame_processed', {'status': 'success'})
             else:
                 emit('frame_processed', {'status': 'error', 'message': 'Failed to process frame'})
+        else:
+            emit('frame_processed', {'status': 'error', 'message': 'Invalid session or mode'})
     except Exception as e:
-        logger.error(f"Error in handle_screen_frame: {e}")
+        logger.error(f"Error in handle_screen_frame: {str(e)}")
         emit('frame_processed', {'status': 'error', 'message': str(e)})
 
 @socketio.on('camera_frame')
@@ -196,11 +227,22 @@ def handle_camera_frame(frame_data):
                     tmp_file.write(base64.b64decode(processed_frame))
                     sessions[session_id]['frame_path'] = tmp_file.name
                 logger.info(f"Camera frame saved to {tmp_file.name}")
+
+                # Send initial description if session not initialized
+                if not sessions[session_id]['session_initialized'] and llm:
+                    frame_base64 = base64.b64encode(base64.b64decode(processed_frame)).decode()
+                    response_text = invoke_llm_for_description(frame_base64, 'camera')
+                    sessions[session_id]['responses'].append({'prompt': '', 'response': response_text})
+                    sessions[session_id]['session_initialized'] = True
+                    emit('initial_response', {'response': response_text})
+
                 emit('frame_processed', {'status': 'success'})
             else:
                 emit('frame_processed', {'status': 'error', 'message': 'Failed to process frame'})
+        else:
+            emit('frame_processed', {'status': 'error', 'message': 'Invalid session or mode'})
     except Exception as e:
-        logger.error(f"Error in handle_camera_frame: {e}")
+        logger.error(f"Error in handle_camera_frame: {str(e)}")
         emit('frame_processed', {'status': 'error', 'message': str(e)})
 
 @app.route('/process_audio', methods=['POST'])
@@ -229,12 +271,26 @@ def process_audio():
         logger.error(f"Stream not initialized for mode: {mode}")
         return jsonify({'error': 'Stream not initialized'}), 400
 
-    try:
+    # Wait for frame if not available
+    frame_path = sessions[session_id].get('frame_path')
+    retries = 0
+    max_retries = 3
+    while (not frame_path or not os.path.exists(frame_path)) and retries < max_retries:
+        logger.warning(f"No frame available for mode: {mode}, retrying ({retries + 1}/{max_retries})")
+        time.sleep(1)
+        retries += 1
         frame_path = sessions[session_id].get('frame_path')
-        if not frame_path or not os.path.exists(frame_path):
-            logger.error(f"No frame available for mode: {mode}")
-            return jsonify({'error': 'No frame available. Please ensure screen/camera sharing is active.'}), 500
 
+    if not frame_path or not os.path.exists(frame_path):
+        logger.error(f"No frame available for mode: {mode} after retries")
+        return jsonify({'error': 'No frame available. Please ensure screen/camera sharing is active.'}), 429
+
+    # Check if session is initialized
+    if not sessions[session_id]['session_initialized']:
+        logger.info("Session not initialized, ignoring prompt")
+        return jsonify({'response': ''})  # Silent response until initialized
+
+    try:
         with open(frame_path, 'rb') as f:
             frame_data = f.read()
             frame_base64 = base64.b64encode(frame_data).decode()
