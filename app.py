@@ -4,6 +4,7 @@ import base64
 import logging
 import tempfile
 import time
+import json
 from PIL import Image
 from io import BytesIO
 from dotenv import load_dotenv
@@ -11,6 +12,7 @@ from flask import Flask, render_template, request, jsonify, redirect, url_for, s
 from flask_socketio import SocketIO, emit
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+import psutil
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
@@ -30,6 +32,27 @@ load_dotenv()
 
 # Global variables
 sessions = {}
+SESSION_FILE = '/tmp/sessions.json'
+
+def load_sessions():
+    """Load sessions from file."""
+    try:
+        if os.path.exists(SESSION_FILE):
+            with open(SESSION_FILE, 'r') as f:
+                global sessions
+                sessions = json.load(f)
+                logger.info("Sessions loaded from file")
+    except Exception as e:
+        logger.error(f"Error loading sessions: {str(e)}")
+
+def save_sessions():
+    """Save sessions to file."""
+    try:
+        with open(SESSION_FILE, 'w') as f:
+            json.dump(sessions, f)
+        logger.info("Sessions saved to file")
+    except Exception as e:
+        logger.error(f"Error saving sessions: {str(e)}")
 
 # Initialize SocketIO
 socketio = SocketIO(
@@ -39,8 +62,8 @@ socketio = SocketIO(
     async_mode='threading',
     logger=False,
     engineio_logger=False,
-    ping_timeout=60,
-    ping_interval=25
+    ping_timeout=120,
+    ping_interval=30
 )
 logger.info("SocketIO initialized successfully")
 
@@ -58,9 +81,14 @@ else:
     )
     logger.info("Gemini model initialized successfully")
 
-def process_frame(frame_data, scale_factor=0.3):
+def process_frame(frame_data, scale_factor=0.2):
     """Process a base64-encoded frame, resize it, and return the base64 string."""
     try:
+        # Skip processing if memory is low
+        if psutil.virtual_memory().percent > 90:
+            logger.warning("Memory usage high, skipping frame processing")
+            return None
+
         if ',' in frame_data:
             img_data = base64.b64decode(frame_data.split(",")[1])
         else:
@@ -70,7 +98,7 @@ def process_frame(frame_data, scale_factor=0.3):
         new_width = int(img.width * scale_factor)
         new_height = int(img.height * scale_factor)
         img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        quality = 50 if os.environ.get('RENDER') else 70
+        quality = 30 if os.environ.get('RENDER') else 50
         buffered = BytesIO()
         img.save(buffered, format="JPEG", quality=quality, optimize=True)
         img_str = base64.b64encode(buffered.getvalue()).decode()
@@ -100,16 +128,19 @@ def invoke_llm_for_description(frame_base64, mode):
 @app.route('/')
 def index():
     """Render the index page."""
+    load_sessions()
     session_id = session.get('session_id', str(uuid.uuid4()))
     session['session_id'] = session_id
     if session_id not in sessions:
         sessions[session_id] = {'mode': None, 'responses': [], 'frame_path': None, 'session_initialized': False}
+        save_sessions()
     logger.info(f"Session {session_id} initialized")
     return render_template('index.html')
 
 @app.route('/chat/<mode>')
 def chat(mode):
     """Render the chat page for the specified mode."""
+    load_sessions()
     session_id = session.get('session_id')
     if not session_id or session_id not in sessions:
         logger.error(f"Session not found in /chat for session_id: {session_id}")
@@ -119,6 +150,7 @@ def chat(mode):
 @app.route('/start_stream', methods=['POST'])
 def start_stream():
     """Start the stream for the specified mode."""
+    load_sessions()
     session_id = session.get('session_id')
     logger.info(f"Starting stream for session_id: {session_id}")
 
@@ -136,12 +168,14 @@ def start_stream():
     sessions[session_id]['mode'] = mode
     sessions[session_id]['frame_path'] = None
     sessions[session_id]['session_initialized'] = False
+    save_sessions()
     logger.info(f"Stream started for mode: {mode}, session_id: {session_id}")
     return jsonify({'status': 'Stream started', 'redirect': url_for('chat', mode=mode)})
 
 @app.route('/stop_stream', methods=['POST'])
 def stop_stream():
     """Stop the stream and clean up resources."""
+    load_sessions()
     session_id = session.get('session_id')
     data = request.get_json()
     mode = data.get('mode')
@@ -155,6 +189,7 @@ def stop_stream():
         sessions[session_id]['responses'] = []
         sessions[session_id]['frame_path'] = None
         sessions[session_id]['session_initialized'] = False
+        save_sessions()
         logger.info(f"Session {session_id} reset")
     else:
         logger.info(f"No active stream found for session_id: {session_id}, mode: {mode}")
@@ -163,6 +198,7 @@ def stop_stream():
 @socketio.on('connect')
 def handle_connect():
     """Handle client connection."""
+    load_sessions()
     session_id = session.get('session_id')
     logger.info(f"Client connected with session_id: {session_id}")
     emit('connected', {'status': 'Connected successfully'})
@@ -177,6 +213,7 @@ def handle_disconnect():
 def handle_screen_frame(frame_data):
     """Handle screen frame updates from the client and save to disk."""
     try:
+        load_sessions()
         session_id = session.get('session_id')
         logger.info(f"Received screen_frame for session_id: {session_id}")
 
@@ -194,12 +231,14 @@ def handle_screen_frame(frame_data):
 
                 # Send initial description if session not initialized
                 if not sessions[session_id]['session_initialized'] and llm:
-                    frame_base64 = base64.b64encode(base64.b64decode(processed_frame)).decode()
+                    frame_base64 = processed_frame  # Already decoded
                     response_text = invoke_llm_for_description(frame_base64, 'desktop')
                     sessions[session_id]['responses'].append({'prompt': '', 'response': response_text})
                     sessions[session_id]['session_initialized'] = True
+                    save_sessions()
                     emit('initial_response', {'response': response_text})
 
+                save_sessions()
                 emit('frame_processed', {'status': 'success'})
             else:
                 emit('frame_processed', {'status': 'error', 'message': 'Failed to process frame'})
@@ -213,6 +252,7 @@ def handle_screen_frame(frame_data):
 def handle_camera_frame(frame_data):
     """Handle camera frame updates from the client and save to disk."""
     try:
+        load_sessions()
         session_id = session.get('session_id')
         logger.info(f"Received camera_frame for session_id: {session_id}")
 
@@ -230,12 +270,14 @@ def handle_camera_frame(frame_data):
 
                 # Send initial description if session not initialized
                 if not sessions[session_id]['session_initialized'] and llm:
-                    frame_base64 = base64.b64encode(base64.b64decode(processed_frame)).decode()
+                    frame_base64 = processed_frame  # Already decoded
                     response_text = invoke_llm_for_description(frame_base64, 'camera')
                     sessions[session_id]['responses'].append({'prompt': '', 'response': response_text})
                     sessions[session_id]['session_initialized'] = True
+                    save_sessions()
                     emit('initial_response', {'response': response_text})
 
+                save_sessions()
                 emit('frame_processed', {'status': 'success'})
             else:
                 emit('frame_processed', {'status': 'error', 'message': 'Failed to process frame'})
@@ -249,6 +291,7 @@ def handle_camera_frame(frame_data):
 def process_audio():
     """Process audio input and generate a response using the frame from disk."""
     logger.info("Received /process_audio request")
+    load_sessions()
     session_id = session.get('session_id')
 
     if not session_id or session_id not in sessions:
@@ -274,7 +317,7 @@ def process_audio():
     # Wait for frame if not available
     frame_path = sessions[session_id].get('frame_path')
     retries = 0
-    max_retries = 3
+    max_retries = 5
     while (not frame_path or not os.path.exists(frame_path)) and retries < max_retries:
         logger.warning(f"No frame available for mode: {mode}, retrying ({retries + 1}/{max_retries})")
         time.sleep(1)
@@ -308,11 +351,12 @@ def process_audio():
         response_text = response.content if hasattr(response, 'content') else str(response)
 
         sessions[session_id]['responses'].append({'prompt': prompt, 'response': response_text})
+        save_sessions()
         logger.info(f"LLM response generated successfully")
         return jsonify({'response': response_text})
 
     except Exception as e:
-        logger.error(f"Assistant error in process_audio: {str(e)}", exc_info=True)
+        logger.error(f"Assistant error in process_audio: {str(e)}")
         return jsonify({'error': f"Failed to process request: {str(e)}"}), 500
 
 @app.route('/health')
@@ -323,7 +367,8 @@ def health_check():
         'socketio_available': True,
         'langchain_available': True,
         'llm_initialized': llm is not None,
-        'google_api_key_set': bool(os.getenv("GOOGLE_API_KEY"))
+        'google_api_key_set': bool(os.getenv("GOOGLE_API_KEY")),
+        'memory_usage_percent': psutil.virtual_memory().percent
     }), 200
 
 @app.errorhandler(500)

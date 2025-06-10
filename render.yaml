@@ -1,51 +1,16 @@
 services:
   - type: web
-    name: video-ai-app
-    runtime: python
+    name: ai-video-2
     env: python
-    buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
-    startCommand: |
-      if [ "$RENDER" = "true" ]; then
-        gunicorn --worker-class eventlet -w 1 --timeout 120 --bind 0.0.0.0:$PORT app:app
-      else
-        python app.py
-      fi
-    plan: starter
-    healthCheckPath: /health
-    region: oregon
+    plan: free
+    repo: <your-repo-url>
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers=1 --timeout=120 --preload
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.11.4"
-      - key: FLASK_ENV
-        value: production
-      - key: RENDER
-        value: "true"
-      - key: WEB_CONCURRENCY
-        value: "1"
-      # Socket.IO specific settings
-      - key: WEBSOCKET_TIMEOUT
-        value: "60"
-      - key: PING_TIMEOUT
-        value: "60"
-      - key: PING_INTERVAL
-        value: "25"
-      # Memory and performance settings
-      - key: MAX_CONTENT_LENGTH
-        value: "10485760"  # 10MB (reduced from 50MB)
-      - key: UPLOAD_FOLDER
-        value: "/tmp"
-      # Logging
-      - key: LOG_LEVEL
-        value: INFO
-      # Required secrets (set these in Render dashboard)
-      - key: SECRET_KEY
-        generateValue: true
       - key: GOOGLE_API_KEY
-        sync: false  # Set this manually in Render dashboard
-    # Disk space for temporary files
-    disk:
-      name: tmp
-      mountPath: /tmp
-      sizeGB: 1
+        value: <your-google-api-key>
+      - key: SECRET_KEY
+        value: <your-secret-key>
+      - key: PYTHON_BUFFERED
+        value: "1"

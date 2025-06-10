@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Assistant Chat</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
     <style>
         .gradient-background {
             background: linear-gradient(300deg, #4B0082, #6A0DAD, #E6E6FA);
@@ -85,16 +85,23 @@
         let canvas = document.createElement('canvas');
         let context = canvas.getContext('2d');
         let frameInterval;
+        let lastFrameData = null;
 
-        // Initialize socket connection with credentials
-        socket = io.connect(window.location.origin, { withCredentials: true });
+        // Initialize socket connection with credentials and reconnection
+        socket = io.connect(window.location.origin, {
+            withCredentials: true,
+            reconnection: true,
+            reconnectionAttempts: Infinity,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000
+        });
         socket.on('connect', () => {
             console.log('WebSocket connected');
             document.getElementById('status').innerText = 'WebSocket connected';
         });
         socket.on('disconnect', () => {
             console.log('WebSocket disconnected');
-            document.getElementById('status').innerText = 'WebSocket disconnected';
+            document.getElementById('status').innerText = 'WebSocket disconnected, reconnecting...';
         });
         socket.on('connect_error', (error) => {
             console.error('WebSocket connection error:', error);
@@ -220,8 +227,14 @@
                         canvas.width = video.videoWidth;
                         canvas.height = video.videoHeight;
                         context.drawImage(video, 0, 0, canvas.width, canvas.height);
-                        const imageData = canvas.toDataURL('image/jpeg', 0.7);
+                        const imageData = canvas.toDataURL('image/jpeg', 0.5); // Lower quality
+                        // Skip if frame is identical to last sent
+                        if (imageData === lastFrameData) {
+                            console.log(`Skipped ${eventName} frame, identical to last`);
+                            return;
+                        }
                         socket.emit(eventName, imageData);
+                        lastFrameData = imageData;
                         console.log(`Sent ${eventName} frame, size: ${imageData.length} bytes`);
                     } else {
                         console.warn('No video dimensions available');
@@ -232,7 +245,7 @@
                 }
             };
             sendFrame(); // Send the first frame immediately
-            frameInterval = setInterval(sendFrame, 5000); // Send every 5 seconds to reduce load
+            frameInterval = setInterval(sendFrame, 5000); // Send every 5 seconds
         }
 
         // Event listeners
